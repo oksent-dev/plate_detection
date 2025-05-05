@@ -1,0 +1,5 @@
+data/
+outputs/
+tests/data/
+tests/outputs/
+src/__pycache__/
