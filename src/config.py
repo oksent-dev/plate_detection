@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 class Config:
+    SAVE_IMAGES = True
     PROJECT_ROOT = Path(__file__).parent.parent
     DATA_PATH = PROJECT_ROOT / "data"
     RAW_IMAGES_PATH = DATA_PATH / "raw"
@@ -17,3 +18,6 @@ class Config:
     DATA_PATH.mkdir(exist_ok=True, parents=True)
     RAW_IMAGES_PATH.mkdir(exist_ok=True, parents=True)
     PROCESSED_IMAGES_PATH.mkdir(exist_ok=True, parents=True)
+
+
+config = Config()

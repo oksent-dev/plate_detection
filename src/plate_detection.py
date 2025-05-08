@@ -1,54 +1,83 @@
-import cv2
 import numpy as np
-from easyocr import Reader
+import os
+from ultralytics import YOLO
+from src.config import Config
+from paddleocr import PaddleOCR
+from src.const import police_plates
+
+config = Config()
+ocr = PaddleOCR(lang="en", show_log=False, use_gpu=True)
+model_path = (
+    config.PROJECT_ROOT / "src" / "runs" / "detect" / "train" / "weights" / "best.pt"
+)
+if not os.path.exists(model_path):
+    print("Model not found. Please train the model first.")
+    exit(1)
+
+model = YOLO(model_path)
 
 
-def predict_plate_number(image_path):
-    image = cv2.imread(image_path)
-    orig = image.copy()
-    reader = Reader(["en"])
-    initial_results = reader.readtext(image, width_ths=0.8, canvas_size=5000)
-    valid_candidates = find_best_plate_candidates(initial_results)
+def predict_plate_number(image: np.ndarray) -> tuple[str, np.ndarray]:
+    """
+    Predicts the plate number from the given image using YOLOv8 and PaddleOCR.
 
-    if valid_candidates:
-        best_candidate = None
-        best_score = float("inf")
-        best_processed_roi = None
+    Parameters:
+    - image: Input image in which to detect the plate number.
 
-        for candidate in valid_candidates:
-            (tl, tr, br, bl) = candidate[0]
-            x_min = int(min(tl[0], bl[0]))
-            y_min = int(min(tl[1], tr[1]))
-            x_max = int(max(tr[0], br[0]))
-            y_max = int(max(bl[1], br[1]))
+    Returns:
+    - (plate_text, processed_roi): Tuple containing the predicted plate text and the ROI of plate.
+    """
 
-            plate_roi = orig[y_min:y_max, x_min:x_max]
-            if plate_roi.shape[1] < 60 or plate_roi.shape[0] < 20:
-                continue
-            processed_roi = preprocess_roi(plate_roi)
+    results = model.predict(image, verbose=False, conf=0.02)
+    if not results or not results[0].boxes:
+        return "", None
 
-            final_results = reader.recognize(
-                processed_roi,
-                allowlist="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-            )
-            if final_results:
-                best_final = max(final_results, key=lambda x: x[2])
-                plate_text = correct_plate_text(best_final[1])
-                if not is_valid_plate(plate_text):
-                    continue
-                score = abs(len(plate_text) - 7)
-                if score < best_score:
-                    best_score = score
-                    best_candidate = plate_text
-                    best_processed_roi = processed_roi
+    best_conf = 0
+    for result in results:
+        for box in result.boxes:
+            if box.conf > best_conf:
+                best_conf = box.conf
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                h = y2 - y1
+                w = x2 - x1
+                if h < 33:
+                    margin = 5
+                    y1 = max(0, y1 - margin)
+                    y2 = min(image.shape[0], y2 + margin)
+                if w < 151:
+                    margin = 25
+                    x1 = max(0, x1)
+                    x2 = min(image.shape[1], x2 + margin)
+                elif w < 175:
+                    margin = 20
+                    x2 = min(image.shape[1], x2 + margin)
+                plate_roi = image[y1:y2, x1:x2]
 
-        if best_candidate:
-            return best_candidate, best_processed_roi
+    processed_roi = plate_roi
 
-    return "", None
+    results = ocr.ocr(
+        processed_roi,
+        cls=False,
+        det=False,
+    )
+    if results and len(results[0]) > 0:
+        best_result = max(results[0], key=lambda x: x[1])
+        plate_text = correct_plate_text(best_result[0])
+        return plate_text, processed_roi
+
+    return "", processed_roi
 
 
-def correct_plate_text(text):
+def correct_plate_text(text: str) -> str:
+    """
+    Corrects the common mistakes in the plate text.
+
+    Parameters:
+    - text: plate text to be corrected.
+
+    Returns:
+    - corrected text.
+    """
     number_to_letter = {
         "5": "S",
         "2": "Z",
@@ -62,9 +91,35 @@ def correct_plate_text(text):
         "O": "0",
         "Z": "7",
     }
+    text = "".join(filter(str.isalnum, text))
+    text = text.upper()
 
-    if text and text[0] in ["I", "1"]:
+    # Plate cannot start with those letters
+    if text and text[0] in ["I", "1", "A"]:
         text = text[1:]
+
+    # If plate starts with 'H' and is not a police plate, it must be false positive
+    if text and text[0] == "H":
+        if text[0:3] not in police_plates:
+            text = text[1:]
+
+    # If plate starts with SC and is 8 characters long, it must have been confused with SCI
+    if text[0:2] == "SC" and len(text[2:]) == 6 and text[2] == "1":
+        text = text[:2] + "I" + text[3:]
+
+    # Plate with 2 letter code can be max 7 characters long
+    if text[0:2].isalpha() and text[2].isdigit() and len(text) == 8:
+        text = text[:-1]
+
+    # Combination of 2 letters + 3 digits + 1 letter + 1 digit cannot occur, probably 'I' confused with '1'
+    if (
+        text[0:2].isalpha()
+        and text[2:5].isdigit()
+        and text[5].isalpha()
+        and text[6].isdigit()
+        and len(text) == 7
+    ):
+        text = text[:2] + "I" + text[3:]
 
     corrected = []
 
@@ -79,43 +134,3 @@ def correct_plate_text(text):
     final_text = "".join(corrected)
 
     return final_text[:8]
-
-
-def preprocess_roi(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
-    gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-
-    kernel = None
-    if gray.shape[1] > 400:
-        kernel = np.ones((7, 7), np.uint8)
-    elif gray.shape[1] <= 400 and gray.shape[1] > 225:
-        kernel = np.ones((3, 3), np.uint8)
-    if kernel is not None:
-        gray = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-        gray = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
-    gray = cv2.bitwise_not(gray)
-    return gray
-
-
-def can_be_valid_plate(text):
-    if 4 <= len(text) <= 11:
-        return True
-    return False
-
-
-def is_valid_plate(text):
-    forbidden = ["GREELJR", "GLIWICE", "GLIW1CE", "GUIWICE", "GUIW1CE"]
-    if can_be_valid_plate(text) and text not in forbidden:
-        return True
-    return False
-
-
-def find_best_plate_candidates(results):
-    valid_candidates = []
-    for detection in sorted(results, key=lambda x: -x[2]):
-        text = detection[1]
-        if can_be_valid_plate(text):
-            valid_candidates.append(detection)
-    return valid_candidates
