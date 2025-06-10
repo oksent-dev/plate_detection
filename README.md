@@ -12,4 +12,4 @@ This project provides an end-to-end pipeline for automatic license plate detecti
 
 ## License
 
-This project is provided for educational and research purposes.
+This project was done for educational and research purposes.
